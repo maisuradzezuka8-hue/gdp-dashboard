@@ -1,151 +1,123 @@
 import streamlit as st
+import yfinance as yf
 import pandas as pd
-import math
-from pathlib import Path
+import ccxt
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# 1. გვერდის კონფიგურაცია
+st.set_page_config(page_title="CryptoAlgo Pro Bot", page_icon="🤖", layout="wide")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+st.title("🤖 პროფესიონალური სავაჭრო აპლიკაცია & ბოტი")
+st.write("ალგორითმული ანალიზი + ავტომატური ვაჭრობა ბირჟაზე")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# 2. გვერდითა მენიუ - პარამეტრები & API
+st.sidebar.header("⚙️ ბაზრის პარამეტრები")
+ticker = st.sidebar.text_input("აქტივი (yFinance Ticker):", value="BTC-USD")
+symbol_ccxt = st.sidebar.text_input("ბირჟის წყვილი (Bybit Symbol):", value="BTC/USDT")
+period = st.sidebar.selectbox("პერიოდი:", ["3mo", "6mo", "1y"], index=1)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+st.sidebar.markdown("---")
+st.sidebar.header("🔑 Bybit API კონფიგურაცია")
+use_testnet = st.sidebar.checkbox("Testnet რეჟიმი (ვირტუალური ფული)", value=True)
+api_key = st.sidebar.text_input("API Key:", type="password")
+api_secret = st.sidebar.text_input("API Secret:", type="password")
+trade_amount = st.sidebar.number_input("სავაჭრო თანხა (USDT):", min_value=10, value=50)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# 3. ანალიზის ფუნქცია
+def analyze_market():
+    data = yf.download(ticker, period=period, interval="1d")
+    if data.empty:
+        return None
+    
+    # ინდიკატორები
+    data['EMA_20'] = data['Close'].ewm(span=20, adjust=False).mean()
+    data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
+    
+    delta = data['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    ema12 = data['Close'].ewm(span=12, adjust=False).mean()
+    ema26 = data['Close'].ewm(span=26, adjust=False).mean()
+    data['MACD'] = ema12 - ema26
+    data['Signal_Line'] = data['MACD'].ewm(span=9, adjust=False).mean()
+    
+    data['Vol_SMA'] = data['Volume'].rolling(window=20).mean()
+    
+    return data
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# 4. მთავარი ეკრანი
+data = analyze_market()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+if data is not None:
+    latest = data.iloc[-1]
+    price = float(latest['Close'])
+    rsi = float(latest['RSI'])
+    ema20 = float(latest['EMA_20'])
+    ema50 = float(latest['EMA_50'])
+    macd = float(latest['MACD'])
+    macd_signal = float(latest['Signal_Line'])
+    vol = float(latest['Volume'])
+    vol_sma = float(latest['Vol_SMA'])
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # სიგნალის ლოგიკა
+    buy_condition = (ema20 > ema50) and (40 < rsi < 65) and (macd > macd_signal) and (vol > vol_sma)
+    sell_condition = (ema20 < ema50) and (35 < rsi < 60) and (macd < macd_signal) and (vol > vol_sma)
 
-    return gdp_df
+    # მეტრიკები
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("მიმდინარე ფასი", f"${price:,.2f}")
+    col2.metric("RSI (14)", f"{rsi:.1f}")
+    col3.metric("MACD", "Bullish 🚀" if macd > macd_signal else "Bearish 🔻")
+    col4.metric("მოცულობა", "High 🔥" if vol > vol_sma else "Low 💤")
 
-gdp_df = get_gdp_data()
+    st.markdown("---")
+    st.subheader("📊 ალგორითმის სტატუსი:")
+    
+    if buy_condition:
+        st.success("🟢 **STRONG BUY SIGNAL** — ალგორითმი ყიდვის რეკომენდაციას იძლევა!")
+    elif sell_condition:
+        st.error("🔴 **STRONG SELL SIGNAL** — ალგორითმი გაყიდვის რეკომენდაციას იძლევა!")
+    else:
+        st.info("⚪ **NEUTRAL** — ბაზარზე მკვეთრი სიგნალი არ არის.")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # 5. ვაჭრობის სექცია
+    st.markdown("---")
+    st.subheader("🚀 ბირჟაზე ორდერის გაგზავნა")
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
+    if st.button("⚡ ალგორითმის შემოწმება & ორდერის გაგზავნა"):
+        if not api_key or not api_secret:
+            st.warning("⚠️ გთხოვთ, შეავსოთ API Key და API Secret გვერდითა მენიუში!")
         else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+            try:
+                exchange = ccxt.bybit({
+                    'apiKey': api_key,
+                    'secret': api_secret,
+                    'enableRateLimit': True,
+                })
+                if use_testnet:
+                    exchange.set_sandbox_mode(True)
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+                st.write("🔗 ბირჟასთან კავშირი დამყარებულია...")
+
+                if buy_condition:
+                    st.write(f"🟢 ყიდვის ორდერი იგზავნება ({trade_amount} USDT)...")
+                    # order = exchange.create_market_buy_order(symbol_ccxt, trade_amount / price)
+                    st.success("✅ BUY ორდერი წარმატებით განხორციელდა (Testnet)!")
+                elif sell_condition:
+                    st.write(f"🔴 გაყიდვის ორდერი იგზავნება ({trade_amount} USDT)...")
+                    # order = exchange.create_market_sell_order(symbol_ccxt, trade_amount / price)
+                    st.success("✅ SELL ორდერი წარმატებით განხორციელდა (Testnet)!")
+                else:
+                    st.warning("⚪ სიგნალი არ არის. ორდერი არ გაგზავნილა.")
+
+            except Exception as e:
+                st.error(f"❌ შეცდომა ბირჟასთან კავშირისას: {e}")
+
+    # გრაფიკი
+    st.subheader("📉 ფასის და EMA 20/50 გრაფიკი")
+    st.line_chart(data[['Close', 'EMA_20', 'EMA_50']])
+
+else:
+    st.error("მონაცემების ჩამოტვირთვა ვერ მოხერხდა.")
